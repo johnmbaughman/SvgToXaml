@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows;
 using System.Windows.Media;
 using System.Xml;
@@ -33,11 +35,11 @@ namespace SvgConverter
         internal static XNamespace NsDef = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
         internal static XmlNamespaceManager NsManager = new XmlNamespaceManager(new NameTable());
 
-        public static string SvgFileToXaml(string filepath, ResultMode resultMode, ResKeyInfo resKeyInfo, WpfDrawingSettings wpfDrawingSettings = null)
+        public static string SvgFileToXaml(string filepath, ResultMode resultMode, ResKeyInfo resKeyInfo,
+            bool filterPixelsPerDip, WpfDrawingSettings wpfDrawingSettings = null)
         {
-            string name;
-            var obj = ConvertSvgToObject(filepath, resultMode, wpfDrawingSettings, out name, resKeyInfo);
-            return SvgObjectToXaml(obj, wpfDrawingSettings != null && wpfDrawingSettings.IncludeRuntime, name);
+            var obj = ConvertSvgToObject(filepath, resultMode, wpfDrawingSettings, out var name, resKeyInfo);
+            return SvgObjectToXaml(obj, wpfDrawingSettings != null && wpfDrawingSettings.IncludeRuntime, name, filterPixelsPerDip);
         }
 
         public static ConvertedSvgData ConvertSvg(string filepath, ResultMode resultMode)
@@ -70,33 +72,36 @@ namespace SvgConverter
             }
         }
 
-        public static string SvgObjectToXaml(object obj, bool includeRuntime, string name)
+        public static string SvgObjectToXaml(object obj, bool includeRuntime, string name, bool filterPixelsPerDip)
         {
             var xamlUntidy = WpfObjToXaml(obj, includeRuntime);
 
             var doc = XDocument.Parse(xamlUntidy);
             BeautifyDrawingElement(doc.Root, name);
+            if (filterPixelsPerDip)
+                FilterPixelsPerDip(doc.Root);
             var xamlWithNamespaces = doc.ToString();
 
             var xamlClean = RemoveNamespaceDeclarations(xamlWithNamespaces);
             return xamlClean;
         }
 
-        public static string SvgDirToXaml(string folder, ResKeyInfo resKeyInfo)
+        public static string SvgDirToXaml(string folder, ResKeyInfo resKeyInfo, bool filterPixelsPerDip)
         {
-            return SvgDirToXaml(folder, resKeyInfo, null);
+            return SvgDirToXaml(folder, resKeyInfo, null, filterPixelsPerDip);
         }
 
-        public static string SvgDirToXaml(string folder, ResKeyInfo resKeyInfo, WpfDrawingSettings wpfDrawingSettings)
+        public static string SvgDirToXaml(string folder, ResKeyInfo resKeyInfo, WpfDrawingSettings wpfDrawingSettings,
+            bool filterPixelsPerDip, bool handleSubFolders = false)
         {
             //firstChar Upper
-            var firstChar = Char.ToUpper(resKeyInfo.XamlName[0]);
+            var firstChar = char.ToUpperInvariant(resKeyInfo.XamlName[0]);
             resKeyInfo.XamlName = firstChar + resKeyInfo.XamlName.Remove(0, 1);
 
 
-            var files = SvgFilesFromFolder(folder);
+            var files = SvgFilesFromFolder(folder, handleSubFolders);
             var dict = ConvertFilesToResourceDictionary(files, wpfDrawingSettings, resKeyInfo);
-            var xamlUntidy = WpfObjToXaml(dict, wpfDrawingSettings != null ? wpfDrawingSettings.IncludeRuntime : false);
+            var xamlUntidy = WpfObjToXaml(dict, wpfDrawingSettings?.IncludeRuntime ?? false);
 
             var doc = XDocument.Parse(xamlUntidy);
             RemoveResDictEntries(doc.Root);
@@ -104,6 +109,9 @@ namespace SvgConverter
             foreach (var drawingGroupElement in drawingGroupElements)
             {
                 BeautifyDrawingElement(drawingGroupElement, null);
+                if (filterPixelsPerDip)
+                    FilterPixelsPerDip(drawingGroupElement);
+
                 ExtractGeometries(drawingGroupElement, resKeyInfo);
             }
 
@@ -113,10 +121,14 @@ namespace SvgConverter
             return doc.ToString();
         }
 
-        public static IEnumerable<string> SvgFilesFromFolder(string folder)
+        public static IEnumerable<string> SvgFilesFromFolder(string folder, bool handleSubFolders = false)
         {
             try
             {
+                if (handleSubFolders)
+                {
+                    return Directory.GetFiles(folder, "*.svg*", SearchOption.AllDirectories);
+                }
                 return Directory.GetFiles(folder, "*.svg*");
             }
             catch
@@ -228,7 +240,7 @@ namespace SvgConverter
             return drawingElement.Descendants()
                 .SelectMany(d => d.Attributes())
                 .Where(a => a.Name.LocalName == "Brush" || a.Name.LocalName == "ForegroundBrush")
-                .Where(a => a.Value.StartsWith("#")); //is Color like #FF000000
+                .Where(a => a.Value.StartsWith("#", StringComparison.InvariantCulture)); //is Color like #FF000000
         }
 
         private static void AddDrawingImagesToDrawingGroups(XElement rootElement)
@@ -242,7 +254,7 @@ namespace SvgConverter
                 //<DrawingImage x:Key="xxx" Drawing="{StaticResource cloud_5_icon_DrawingGroup}"/>
                 var drawingImage = new XElement(NsDef + "DrawingImage",
                     new XAttribute(Nsx + "Key", nameImg),
-                    new XAttribute("Drawing", string.Format("{{StaticResource {0}}}", nameDg))
+                    new XAttribute("Drawing", string.Format(CultureInfo.InvariantCulture, "{{StaticResource {0}}}", nameDg))
                     );
                 node.AddAfterSelf(drawingImage);
             }
@@ -412,7 +424,7 @@ namespace SvgConverter
             var clipElement = GetClipElement(drawingElement, out clipRect);
             if (clipElement != null && clipElement.Parent.Name.LocalName == "DrawingGroup")
             {   //add Attribute: ClipGeometry="M0,0 V40 H40 V0 H0 Z" this is the description of a rectangle-like Geometry
-                clipElement.Parent.Add(new XAttribute("ClipGeometry", string.Format("M{0},{1} V{2} H{3} V{0} H{1} Z", clipRect.Left, clipRect.Top, clipRect.Bottom, clipRect.Right)));
+                clipElement.Parent.Add(new XAttribute("ClipGeometry", string.Format(CultureInfo.InvariantCulture, "M{0},{1} V{2} H{3} V{0} H{1} Z", clipRect.Left, clipRect.Top, clipRect.Bottom, clipRect.Right)));
                 //delete the old Element
                 clipElement.Remove();
             }
@@ -486,6 +498,17 @@ namespace SvgConverter
             var attributes = drawingElement.Attributes().ToList();
             attributes.Insert(0, new XAttribute(Nsx + "Key", name)); //place in first position
             drawingElement.ReplaceAttributes(attributes);
+        }
+
+        private static void FilterPixelsPerDip(XElement drawingElement)
+        {
+            var glyphRuns = drawingElement.Descendants(NsDef + nameof(GlyphRun)).ToList();
+            foreach (var glyphRun in glyphRuns)
+            {
+                var pixelsPerDipAttr = glyphRun.Attribute(nameof(GlyphRun.PixelsPerDip));
+                if (pixelsPerDipAttr != null)
+                    pixelsPerDipAttr.Remove();
+            }
         }
 
         private static void ExtractGeometries(XElement drawingGroupElement, ResKeyInfo resKeyInfo)
@@ -604,7 +627,7 @@ namespace SvgConverter
                     result = name.Substring(p1 + 1, p2 - p1 - 1);
                 else
                     result = name;
-                if (result.EndsWith("Key"))
+                if (result.EndsWith("Key", StringComparison.InvariantCulture))
                     result = result.Substring(0, result.Length - 3);
                 return result;
             }
